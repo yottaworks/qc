@@ -15,8 +15,9 @@ from torch.autograd import Variable
 from torchvision import transforms
 
 LOG_FORMAT = "%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s"
+CONFIG_FILE = "qc.config"
 
-logging.basicConfig(filename='build_model.log', level=logging.DEBUG, format=LOG_FORMAT)
+logging.basicConfig(filename='qc.log', level=logging.DEBUG, format=LOG_FORMAT)
 logFormatter = logging.Formatter(LOG_FORMAT)
 rootLogger = logging.getLogger()
 
@@ -78,11 +79,15 @@ def upload_to_aws(image, region, bucket):
 
 
 def main():
+
+    if not os.path.exists(CONFIG_FILE):
+        logging.error("Missing configuration file")
+        sys.exit(4)
+
     config = configparser.ConfigParser()
-    config.read('qc.config')
+    config.read(CONFIG_FILE)
 
     try:
-        # options, args = getopt.getopt(sys.argv[1:], "m:b:r:")
         options, args = getopt.getopt(sys.argv[1:], "e")
     except getopt.GetoptError as err:
         # print help information and exit:
@@ -90,31 +95,23 @@ def main():
         usage()
         sys.exit(2)
 
+    environment = 'DEFAULT'
     for o, a in options:
-        if o == '-m':
-            model_file = a
-        elif o == '-b':
-            bucket = a
-        elif o == '-r':
-            region = a
-        elif o == '-e':
+        if o == '-e':
             environment = a
         else:
             usage()
             sys.exit(1)
+    try:
+        model_file = config[environment]['model']
+        bucket = config[environment]['bucket']
+        region = config[environment]['region']
+        rtsp_url = config[environment]['rtsp_url']
+    except KeyError:
+        logging.error("Bad configuration file (missing key)")
+        sys.exit(6)
 
-    # model_file = None
-    # bucket = None
-    # region = None
-    # config_file = 'qc.config'
-    environment = 'DEFAULT'
-
-    model_file = config[environment]['model']
-    bucket = config[environment]['bucket']
-    region = config[environment]['region']
-    rtsp_url = config[environment]['rtsp_url']
-
-    if model_file is None or region is None or bucket is None:
+    if model_file is None or region is None or bucket is None or rtsp_url is None:
         usage()
         sys.exit(2)
 
@@ -139,7 +136,6 @@ def main():
 
     logging.info("Begin ")
 
-    video_capture = cv.VideoCapture("rtsp://10.0.0.80/cam1/mpeg4")
     video_capture = cv.VideoCapture(rtsp_url)
 
     #    while True:
