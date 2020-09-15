@@ -4,19 +4,20 @@ import cv2 as cv
 import getopt
 import logging
 import os
-import queue
 import sys
+import _thread
 import torch
 import torch.onnx
 import uuid
 from os import path
-from threading import Thread
+from time import sleep
 from torch.autograd import Variable
 from torchvision import transforms
 
 LOG_FORMAT = "%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s"
+CONFIG_FILE = "qc.config"
 
-logging.basicConfig(filename='build_model.log', level=logging.DEBUG, format=LOG_FORMAT)
+logging.basicConfig(filename='qc.log', level=logging.DEBUG, format=LOG_FORMAT)
 logFormatter = logging.Formatter(LOG_FORMAT)
 rootLogger = logging.getLogger()
 
@@ -25,12 +26,15 @@ consoleHandler.setFormatter(logFormatter)
 
 rootLogger.addHandler(consoleHandler)
 
+is_scoring = False
+
+CONTAINER = 0
+NO_CONTAINER = 1
+state = NO_CONTAINER
+
 
 def usage():
-    print("Usage: QuayChain -m <ONNX recognition model> -b <s3 bucket name> -r <aws region>")
-
-
-processing_queue = queue.Queue()
+    print("Usage: QuayChain -e <optional configuration>")
 
 
 def capture_frame(vc, q):
@@ -46,9 +50,12 @@ def capture_frame(vc, q):
             q.join()
 
 
-def process_frame(image_tensor, device, model):
+def process_frame(image, tensor_transforms, device, model, region, bucket):
+    global is_scoring
+
+    is_scoring = True
     labels = ['Not a shipping container', 'shipping container', 'shipping container front']
-    #       image_tensor = test_transforms(image).float()
+    image_tensor = tensor_transforms(image).float()
     image_tensor = image_tensor.unsqueeze_(0)
     predict_input = Variable(image_tensor)
     predict_input = predict_input.to(device)
@@ -58,8 +65,21 @@ def process_frame(image_tensor, device, model):
     probabilities, classes = output.topk(1, dim=1)
 
     message = 'Model is {:01.1f}% certain image is {}'.format(probabilities.item() * 100, labels[classes.item()])
-
     logging.info(message)
+
+    global state
+
+    if state == NO_CONTAINER:
+        if classes.item() == 1 or classes.item() == 2:
+            upload_to_aws(image, region, bucket)
+            logging.info("New container found")
+            state = CONTAINER
+    else:
+        if classes.item() == 0:
+            logging.info("Container clear of view")
+            state = NO_CONTAINER
+
+    is_scoring = False
 
     return classes.item()
 
@@ -67,7 +87,7 @@ def process_frame(image_tensor, device, model):
 def upload_to_aws(image, region, bucket):
     try:
         file_name = "test-{}.jpg".format(str(uuid.uuid1()))
-        image_file = image.save(file_name)
+        image.save(file_name)
         with open(file_name, 'rb') as f:
             client = boto3.client('s3', region_name=region)
             client.upload_fileobj(f, bucket, file_name)
@@ -78,11 +98,15 @@ def upload_to_aws(image, region, bucket):
 
 
 def main():
+
+    if not os.path.exists(CONFIG_FILE):
+        logging.error("Missing configuration file")
+        sys.exit(4)
+
     config = configparser.ConfigParser()
-    config.read('qc.config')
+    config.read(CONFIG_FILE)
 
     try:
-        # options, args = getopt.getopt(sys.argv[1:], "m:b:r:")
         options, args = getopt.getopt(sys.argv[1:], "e")
     except getopt.GetoptError as err:
         # print help information and exit:
@@ -90,31 +114,23 @@ def main():
         usage()
         sys.exit(2)
 
+    environment = 'DEFAULT'
     for o, a in options:
-        if o == '-m':
-            model_file = a
-        elif o == '-b':
-            bucket = a
-        elif o == '-r':
-            region = a
-        elif o == '-e':
+        if o == '-e':
             environment = a
         else:
             usage()
             sys.exit(1)
+    try:
+        model_file = config[environment]['model']
+        bucket = config[environment]['bucket']
+        region = config[environment]['region']
+        rtsp_url = config[environment]['rtsp_url']
+    except KeyError:
+        logging.error("Bad configuration file (missing key)")
+        sys.exit(6)
 
-    # model_file = None
-    # bucket = None
-    # region = None
-    # config_file = 'qc.config'
-    environment = 'DEFAULT'
-
-    model_file = config[environment]['model']
-    bucket = config[environment]['bucket']
-    region = config[environment]['region']
-    rtsp_url = config[environment]['rtsp_url']
-
-    if model_file is None or region is None or bucket is None:
+    if model_file is None or region is None or bucket is None or rtsp_url is None:
         usage()
         sys.exit(2)
 
@@ -137,49 +153,35 @@ def main():
     ])
     to_pil = transforms.ToPILImage()
 
-    logging.info("Begin ")
+    logging.info("Starting")
 
-    video_capture = cv.VideoCapture("rtsp://10.0.0.80/cam1/mpeg4")
-    video_capture = cv.VideoCapture(rtsp_url)
+    global is_scoring
 
-    #    while True:
-    #        return_value, frame = video_capture.read()
-
-    #        if return_value:
-    #            cv.resizeWindow('QuayChain', 640, 480)
-    #            cv.imshow('QuayChain', cv.resize(frame, (640, 480)))
-    #        else:
-    # reconnect to the video stream
-
-    stream_processor = Thread(target=capture_frame, args=(video_capture, processing_queue))
-    stream_processor.setDaemon(True)
-    stream_processor.start()
-
-    while True:
+    is_running = True
+    while is_running:
         try:
-            #   logging.debug('Queue size=%d', processing_queue.qsize())
-            frame = processing_queue.get(block=True, timeout=1.0)
-
-            if frame is not None:
-                logging.debug('Displaying frame.')
-                cv.resizeWindow('QuayChain', 640, 480)
-                cv.imshow('QuayChain', cv.resize(frame, (640, 480)))
-                image = to_pil(frame)
-                classification = process_frame(test_transforms(image).float(), device, model)
-                if classification == 2 or classification == 1:
-                    logging.info('Found container')
-                    upload_to_aws(image, region, bucket)
-                    logging.info('Upload to S3')
-                    break
-                processing_queue.task_done()
-
-        except queue.Empty:
-            logging.debug("Timed out waiting for a frame.")
+            video = cv.VideoCapture(rtsp_url)
+            while True:
+                ret, frame = video.read()
+                if ret and is_scoring is False:
+                    logging.debug('Processing frame')
+                    image = to_pil(frame)
+                    _thread.start_new_thread(process_frame, (image, test_transforms, device, model, region, bucket))
+                    sleep(0.25)
+                elif ret is False:
+                    logging.info("Re-connecting")
+                    video.release()
+                    video = cv.VideoCapture(rtsp_url)
+        except KeyboardInterrupt:
+            break
+        except:
+            e = sys.exc_info()[0]
+            print("Unexpected error with prediction: %s" % e)
 
         if cv.waitKey(20) & 0xff == ord('q'):
             break
 
-    logging.info("Complete")
+    logging.info("Shutdown complete")
 
 
 if __name__ == '__main__':
