@@ -4,11 +4,13 @@ import cv2 as cv
 import getopt
 import logging
 import os
+import signal
 import sys
 import _thread
 import torch
 import torch.onnx
 import uuid
+from logging.handlers import RotatingFileHandler
 from os import path
 from time import sleep
 from torch.autograd import Variable
@@ -26,7 +28,12 @@ consoleHandler.setFormatter(logFormatter)
 
 rootLogger.addHandler(consoleHandler)
 
+rotatingFileHandler = RotatingFileHandler("/var/log/quaychain.log", maxBytes=1000000, backupCount=5)
+rotatingFileHandler.setFormatter(logFormatter)
+rootLogger.addHandler(rotatingFileHandler)
+
 is_scoring = False
+is_running = False
 
 CONTAINER = 0
 NO_CONTAINER = 1
@@ -97,6 +104,12 @@ def upload_to_aws(image, region, bucket):
         logging.error("Failed to upload image to AWS 3: {}".format(e))
 
 
+def receive_signal(signal_number, frame):
+    global is_running
+    logging.info("Received signal {}".format(signal_number))
+    is_running = False
+
+
 def main():
 
     if not os.path.exists(CONFIG_FILE):
@@ -156,30 +169,44 @@ def main():
     logging.info("Starting")
 
     global is_scoring
+    global is_running
+
+    # register the signals to be caught
+    signal.signal(signal.SIGHUP, receive_signal)
+    signal.signal(signal.SIGINT, receive_signal)
+    signal.signal(signal.SIGQUIT, receive_signal)
+    signal.signal(signal.SIGILL, receive_signal)
+    signal.signal(signal.SIGTRAP, receive_signal)
+    signal.signal(signal.SIGABRT, receive_signal)
+    signal.signal(signal.SIGBUS, receive_signal)
+    signal.signal(signal.SIGFPE, receive_signal)
+    #signal.signal(signal.SIGKILL, receive_signal)
+    signal.signal(signal.SIGUSR1, receive_signal)
+    signal.signal(signal.SIGSEGV, receive_signal)
+    signal.signal(signal.SIGUSR2, receive_signal)
+    signal.signal(signal.SIGPIPE, receive_signal)
+    signal.signal(signal.SIGALRM, receive_signal)
+    signal.signal(signal.SIGTERM, receive_signal)
 
     is_running = True
-    while is_running:
-        try:
-            video = cv.VideoCapture(rtsp_url)
-            while True:
-                ret, frame = video.read()
-                if ret and is_scoring is False:
-                    logging.debug('Processing frame')
-                    image = to_pil(frame)
-                    _thread.start_new_thread(process_frame, (image, test_transforms, device, model, region, bucket))
-                    sleep(0.25)
-                elif ret is False:
-                    logging.info("Re-connecting")
-                    video.release()
-                    video = cv.VideoCapture(rtsp_url)
-        except KeyboardInterrupt:
-            break
-        except:
-            e = sys.exc_info()[0]
-            print("Unexpected error with prediction: %s" % e)
-
-        if cv.waitKey(20) & 0xff == ord('q'):
-            break
+    try:
+        video = cv.VideoCapture(rtsp_url)
+        while is_running:
+            ret, frame = video.read()
+            if ret and is_scoring is False:
+                logging.debug('Processing frame')
+                image = to_pil(frame)
+                _thread.start_new_thread(process_frame, (image, test_transforms, device, model, region, bucket))
+                sleep(0.25)
+            elif ret is False:
+                logging.info("Re-connecting")
+                video.release()
+                video = cv.VideoCapture(rtsp_url)
+    except KeyboardInterrupt:
+        logging.error("Keyboard interrupted - stopping now")
+    except:
+        e = sys.exc_info()[0]
+        print("Unexpected error with prediction: %s" % e)
 
     logging.info("Shutdown complete")
 
