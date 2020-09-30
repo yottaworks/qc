@@ -19,7 +19,7 @@ from torchvision import transforms
 LOG_FORMAT = "%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s"
 CONFIG_FILE = "qc.config"
 
-logging.basicConfig(filename='qc.log', level=logging.DEBUG, format=LOG_FORMAT)
+logging.basicConfig(filename='qc.log', level=logging.INFO, format=LOG_FORMAT)
 logFormatter = logging.Formatter(LOG_FORMAT)
 rootLogger = logging.getLogger()
 
@@ -72,7 +72,7 @@ def process_frame(image, tensor_transforms, device, model, region, bucket):
     probabilities, classes = output.topk(1, dim=1)
 
     message = 'Model is {:01.1f}% certain image is {}'.format(probabilities.item() * 100, labels[classes.item()])
-    logging.info(message)
+    logging.debug(message)
 
     global state
 
@@ -94,6 +94,7 @@ def process_frame(image, tensor_transforms, device, model, region, bucket):
 def upload_to_aws(image, region, bucket):
     try:
         file_name = "test-{}.jpg".format(str(uuid.uuid1()))
+        logging.info("Uploading {} to AWS S3 ({})".format(file_name, bucket))
         image.save(file_name)
         with open(file_name, 'rb') as f:
             client = boto3.client('s3', region_name=region)
@@ -199,7 +200,7 @@ def main():
                 _thread.start_new_thread(process_frame, (image, test_transforms, device, model, region, bucket))
                 sleep(0.25)
             elif ret is False:
-                logging.info("Re-connecting")
+                logging.info("Re-connecting to video stream")
                 video.release()
                 video = cv.VideoCapture(rtsp_url)
     except KeyboardInterrupt:
